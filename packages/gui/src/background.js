@@ -30,7 +30,13 @@ let winIsHidden = false
 
 let tray // 防止被内存清理
 let forceClose = false
-DevSidecar.api.config.reload()
+
+try {
+  DevSidecar.api.config.reload()
+} catch (e) {
+  log.error('配置加载失败:', e)
+}
+
 let hideDockWhenWinClose = DevSidecar.api.config.get().app.dock.hideWhenWinClose || false
 // Scheme must be registered before the app is ready
 protocol.registerSchemesAsPrivileged([
@@ -87,7 +93,7 @@ function setTray () {
       click: () => {
         log.info('force quit')
         forceClose = true
-        quit()
+        quit('系统托盘图标-退出')
       },
     },
   ]
@@ -106,12 +112,12 @@ function setTray () {
   // 当桌面主题更新时
   if (isMac) {
     nativeTheme.on('updated', () => {
-      console.log('i am changed')
+      log.info('i am changed')
       if (nativeTheme.shouldUseDarkColors) {
-        console.log('i am dark.')
+        log.info('i am dark.')
         tray.setImage(iconWhitePath)
       } else {
-        console.log('i am light.')
+        log.info('i am light.')
         tray.setImage(iconBlackPath)
         // tray.setPressedImage(iconWhitePath)
       }
@@ -143,10 +149,10 @@ function isLinux () {
   return platform === 'linux'
 }
 
-function hideWin () {
+function hideWin (reason = '') {
   if (win) {
     if (isLinux()) {
-      quit()
+      quit(`is linux, not hide win, do quit, ${reason}`)
       return
     }
     win.hide()
@@ -154,12 +160,16 @@ function hideWin () {
       app.dock.hide()
     }
     winIsHidden = true
+  } else {
+    log.warn('win is null, do not hide win')
   }
 }
 
 function showWin () {
   if (win) {
     win.show()
+  } else {
+    log.warn('win is null, do not show win')
   }
   if (app.dock) {
     app.dock.show()
@@ -173,25 +183,34 @@ function changeAppConfig (config) {
   }
 }
 
-function createWindow (startHideWindow) {
+function createWindow (startHideWindow, autoQuitIfError = true) {
   // Create the browser window.
   const windowSize = DevSidecar.api.config.get().app.windowSize || {}
-  win = new BrowserWindow({
-    width: windowSize.width || 900,
-    height: windowSize.height || 750,
-    title: 'DevSidecar',
-    webPreferences: {
-      enableRemoteModule: true,
-      contextIsolation: false,
-      nativeWindowOpen: true, // ADD THIS
-      // preload: path.join(__dirname, 'preload.js'),
-      // Use pluginOptions.nodeIntegration, leave this alone
-      // See nklayman.github.io/vue-cli-plugin-electron-builder/guide/security.html#node-integration for more info
-      nodeIntegration: true, // process.env.ELECTRON_NODE_INTEGRATION
-    },
-    show: !startHideWindow,
-    icon: path.join(__static, 'icon.png'),
-  })
+
+  try {
+    win = new BrowserWindow({
+      width: windowSize.width || 900,
+      height: windowSize.height || 750,
+      title: 'DevSidecar',
+      webPreferences: {
+        enableRemoteModule: true,
+        contextIsolation: false,
+        nativeWindowOpen: true, // ADD THIS
+        // Use pluginOptions.nodeIntegration, leave this alone
+        // See nklayman.github.io/vue-cli-plugin-electron-builder/guide/security.html#node-integration for more info
+        nodeIntegration: true, // process.env.ELECTRON_NODE_INTEGRATION
+      },
+      show: !startHideWindow,
+      icon: path.join(__static, 'icon.png'),
+    })
+  } catch (e) {
+    log.error('创建窗口失败:', e)
+    dialog.showErrorBox('错误', `创建窗口失败: ${e.message}`)
+    if (autoQuitIfError) {
+      quit('创建窗口失败')
+    }
+    return false
+  }
   winIsHidden = !!startHideWindow
 
   Menu.setApplicationMenu(null)
@@ -215,7 +234,7 @@ function createWindow (startHideWindow) {
   }
 
   if (startHideWindow) {
-    hideWin()
+    hideWin('startHideWindow')
   }
 
   win.on('closed', async (...args) => {
@@ -226,9 +245,9 @@ function createWindow (startHideWindow) {
 
   ipcMain.on('close', async (event, message) => {
     if (message.value === 1) {
-      quit()
+      quit('ipc receive "close"')
     } else {
-      hideWin()
+      hideWin('ipc receive "close"')
     }
   })
 
@@ -239,7 +258,7 @@ function createWindow (startHideWindow) {
     }
     e.preventDefault()
     if (isLinux()) {
-      quit()
+      quit('win close')
       return
     }
     const config = DevSidecar.api.config.get()
@@ -249,16 +268,16 @@ function createWindow (startHideWindow) {
       win.webContents.send('close.showTip', closeStrategy)
     } else if (closeStrategy === 1) {
       // 直接退出
-      quit()
+      quit('win close')
     } else if (closeStrategy === 2) {
       // 隐藏窗口
-      hideWin()
+      hideWin('win close')
     }
   })
 
   win.on('session-end', async (e, ...args) => {
     log.info('win session-end:', e, ...args)
-    await quit()
+    await quit('win session-end')
   })
 
   const shortcut = (event, input) => {
@@ -299,16 +318,29 @@ function createWindow (startHideWindow) {
   // 监听渲染进程发送过来的消息
   win.webContents.on('ipc-message', (event, channel, message, ...args) => {
     console.info('win ipc-message:', event, channel, message, ...args)
+
+    // 记录日志
+    if (channel && channel.startsWith('[ERROR]')) {
+      log.error('win ipc-message:', channel.substring(7), message, ...args)
+    } else {
+      log.info('win ipc-message:', channel, message, ...args)
+    }
+
     if (channel === 'change-showHideShortcut') {
       registerShowHideShortcut(message)
     }
   })
+
+  return true
 }
 
 async function beforeQuit () {
+  log.info('before quit')
   return DevSidecar.api.shutdown()
 }
-async function quit () {
+async function quit (reason) {
+  log.info('app quit:', reason)
+
   if (tray) {
     tray.displayBalloon({ title: '正在关闭', content: '关闭中,请稍候。。。' })
   }
@@ -362,129 +394,142 @@ function initApp () {
 }
 
 // -------------执行开始---------------
-app.disableHardwareAcceleration() // 禁用gpu
+try {
+  app.disableHardwareAcceleration() // 禁用gpu
 
-// 开启后是否默认隐藏window
-let startHideWindow = !DevSidecar.api.config.get().app.startShowWindow
-if (app.getLoginItemSettings().wasOpenedAsHidden) {
-  startHideWindow = true
-} else if (process.argv) {
-  const args = minimist(process.argv)
-  log.info('start args:', args)
-
-  // 通过启动参数，判断是否隐藏窗口
-  const hideWindowArg = `${args.hideWindow}`
-  if (hideWindowArg === 'true' || hideWindowArg === '1') {
+  // 开启后是否默认隐藏window
+  let startHideWindow = !DevSidecar.api.config.get().app.startShowWindow
+  if (app.getLoginItemSettings().wasOpenedAsHidden) {
     startHideWindow = true
-  } else if (hideWindowArg === 'false' || hideWindowArg === '0') {
-    startHideWindow = false
+  } else if (process.argv) {
+    const args = minimist(process.argv)
+    log.info('start args:', args)
+
+    // 通过启动参数，判断是否隐藏窗口
+    const hideWindowArg = `${args.hideWindow}`
+    if (hideWindowArg === 'true' || hideWindowArg === '1') {
+      startHideWindow = true
+    } else if (hideWindowArg === 'false' || hideWindowArg === '0') {
+      startHideWindow = false
+    }
   }
-}
-log.info('startHideWindow = ', startHideWindow, ', app.getLoginItemSettings() = ', jsonApi.stringify2(app.getLoginItemSettings()))
+  log.info('startHideWindow = ', startHideWindow, ', app.getLoginItemSettings() = ', jsonApi.stringify2(app.getLoginItemSettings()))
 
-// 禁止双开
-const isFirstInstance = app.requestSingleInstanceLock()
-if (!isFirstInstance) {
-  log.info('is second instance')
-  setTimeout(() => {
-    app.quit()
-  }, 1000)
-} else {
-  app.on('before-quit', async () => {
-    log.info('before-quit')
-    if (process.platform === 'darwin') {
-      quit()
-    }
-  })
-  app.on('will-quit', () => {
-    log.info('应用关闭，注销所有快捷键')
-    globalShortcut.unregisterAll()
-  })
-  app.on('second-instance', (event, commandLine) => {
-    log.info('new app started, command:', commandLine)
-    if (win) {
-      showWin()
-      win.focus()
-    }
-  })
-
-  // Quit when all windows are closed.
-  app.on('window-all-closed', () => {
-    log.info('window-all-closed')
-    // On macOS it is common for applications and their menu bar
-    // to stay active until the user quits explicitly with Cmd + Q
-    if (process.platform !== 'darwin') {
-      quit()
-    }
-  })
-
-  app.on('activate', () => {
-    // On macOS it's common to re-create a window in the app when the
-    // dock icon is clicked and there are no other windows open.
-    if (win == null) {
-      createWindow(false)
-    } else {
-      showWin()
-    }
-  })
-
-  // initApp()
-
-  // This method will be called when Electron has finished
-  // initialization and is ready to create browser windows.
-  // Some APIs can only be used after this event occurs.
-  app.on('ready', async () => {
-    if (isDevelopment && !process.env.IS_TEST) {
-      // Install Vue Devtools
-      // try {
-      //   await installExtension(VUEJS_DEVTOOLS)
-      // } catch (e) {
-      //   log.error('Vue Devtools failed to install:', e.toString())
-      // }
-    }
-    try {
-      createWindow(startHideWindow)
-      const context = { win, app, beforeQuit, quit, ipcMain, dialog, log, api: DevSidecar.api, changeAppConfig }
-      backend.install(context) // 模块安装
-    } catch (err) {
-      log.info('error:', err)
-    }
-
-    try {
-      // 最小化到托盘
-      tray = setTray()
-    } catch (err) {
-      log.info('error:', err)
-    }
-
-    _powerMonitor.on('shutdown', async (e) => {
-      if (e) {
-        e.preventDefault()
-      }
-      log.info('系统关机，恢复代理设置')
-      await quit()
-    })
-  })
-}
-
-initApp()
-
-// Exit cleanly on request from parent process in development mode.
-if (isDevelopment) {
-  if (process.platform === 'win32') {
-    process.on('message', (data) => {
-      if (data === 'graceful-exit') {
-        quit()
-      }
-    })
+  // 禁止双开
+  const isFirstInstance = app.requestSingleInstanceLock()
+  if (!isFirstInstance) {
+    log.info('app quit: is second instance')
+    setTimeout(() => {
+      app.quit()
+    }, 1000)
   } else {
-    process.on('SIGINT', () => {
-      quit()
+    app.on('before-quit', async () => {
+      log.info('before-quit')
+      if (process.platform === 'darwin') {
+        quit('before quit')
+      }
+    })
+    app.on('will-quit', () => {
+      log.info('应用关闭，注销所有快捷键')
+      globalShortcut.unregisterAll()
+    })
+    app.on('second-instance', (event, commandLine) => {
+      log.info('new app started, command:', commandLine)
+      if (win) {
+        showWin()
+        win.focus()
+      }
+    })
+
+    // Quit when all windows are closed.
+    app.on('window-all-closed', () => {
+      log.info('window-all-closed')
+      // On macOS it is common for applications and their menu bar
+      // to stay active until the user quits explicitly with Cmd + Q
+      if (process.platform !== 'darwin') {
+        quit('window-all-closed')
+      }
+    })
+
+    app.on('activate', () => {
+      // On macOS it's common to re-create a window in the app when the
+      // dock icon is clicked and there are no other windows open.
+      if (win == null) {
+        createWindow(false, false)
+      } else {
+        showWin()
+      }
+    })
+
+    // initApp()
+
+    // This method will be called when Electron has finished
+    // initialization and is ready to create browser windows.
+    // Some APIs can only be used after this event occurs.
+    app.on('ready', async () => {
+      if (isDevelopment && !process.env.IS_TEST) {
+        // Install Vue Devtools
+        // try {
+        //   await installExtension(VUEJS_DEVTOOLS)
+        // } catch (e) {
+        //   log.error('Vue Devtools failed to install:', e.toString())
+        // }
+      }
+
+      try {
+        if (!createWindow(startHideWindow)) {
+          return // 创建窗口失败，应用将关闭
+        }
+      } catch (err) {
+        log.error('createWindow error:', err)
+      }
+
+      try {
+        const context = { win, app, beforeQuit, quit, ipcMain, dialog, log, api: DevSidecar.api, changeAppConfig }
+        backend.install(context) // 模块安装
+      } catch (err) {
+        log.error('install modules error:', err)
+      }
+
+      try {
+        // 最小化到托盘
+        tray = setTray()
+      } catch (err) {
+        log.error('setTray error:', err)
+      }
+
+      _powerMonitor.on('shutdown', async (e) => {
+        if (e) {
+          e.preventDefault()
+        }
+        log.info('系统关机，恢复代理设置')
+        await quit('系统关机')
+      })
     })
   }
+
+  initApp()
+
+  // Exit cleanly on request from parent process in development mode.
+  if (isDevelopment) {
+    if (process.platform === 'win32') {
+      process.on('message', (data) => {
+        if (data === 'graceful-exit') {
+          quit('graceful-exit')
+        }
+      })
+    } else {
+      process.on('SIGINT', () => {
+        quit('SIGINT')
+      })
+    }
+  }
+  // 系统关机和重启时的操作
+  process.on('exit', () => {
+    quit('进程结束，退出app')
+  })
+
+  log.info('background.js finished')
+} catch (e) {
+  log.error('应用启动过程中，出现未知异常：', e)
 }
-// 系统关机和重启时的操作
-process.on('exit', () => {
-  log.info('进程结束，退出app')
-  quit()
-})

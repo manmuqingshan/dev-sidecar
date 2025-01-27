@@ -38,7 +38,7 @@ const api = {
         }
       })
       newServer.on('error', (e) => {
-        log.info('server error', e)
+        log.error('server error', e)
         // newServer = null
         fireError(e)
       })
@@ -112,7 +112,7 @@ function registerProcessListener () {
     log.info('代理服务进程被关闭:', code, signal)
   })
   process.on('beforeExit', (code, signal) => {
-    console.log('Process beforeExit event with code: ', code, signal)
+    log.info('Process beforeExit event with code: ', code, signal)
   })
   process.on('SIGPIPE', (code, signal) => {
     log.warn('sub Process SIGPIPE', code, signal)
